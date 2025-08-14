@@ -105,7 +105,7 @@ void draw_mandel() {
 }
 
 int main() {
-    display.init(FRAME_WIDTH, FRAME_HEIGHT, DVHSTX::MODE_PALETTE);
+    display.init(FRAME_WIDTH, FRAME_HEIGHT, DVHSTX::MODE_PALETTE, {13, 15, 17, 19});
 
     stdio_init_all();
 

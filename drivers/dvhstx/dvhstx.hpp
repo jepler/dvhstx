@@ -39,6 +39,7 @@ namespace pimoroni {
       MODE_RGB888 = 3,
       MODE_TEXT_MONO = 4,
       MODE_TEXT_RGB111 = 5,
+      MODE_LINE_CALLBACK = 6,
     };
 
     enum TextColour {
@@ -96,8 +97,20 @@ namespace pimoroni {
 
       void clear();
 
+      typedef void(*line_fun_t)(void *cb_data, int line_num, uint32_t *data); 
+      void set_callback(line_fun_t cb, void *data) {
+        callback = cb;
+        cb_data = data;
+      }
       bool init(uint16_t width, uint16_t height, Mode mode = MODE_RGB565, Pinout pinout = {13, 15, 17, 19});
+      bool init(uint16_t width, uint16_t height, line_fun_t cb, void *data, Pinout pinout = {13, 15, 17, 19}) {
+        set_callback(cb, data);
+        return init(width, height, MODE_LINE_CALLBACK, pinout);
+      }
       void reset();
+
+      int get_h_repeat_shift() const { return h_repeat_shift; }
+      int get_h_active_pixels() const;
 
       // Wait for vsync and then flip the buffers
       void flip_blocking();
@@ -117,7 +130,8 @@ namespace pimoroni {
       void text_dma_handler();
 
     private:
-      RGB888 palette[PALETTE_SIZE];
+      bool do_init(uint16_t width, uint16_t height, line_fun_t cb, void *cb_data, Mode mode, Pinout pinout);
+      RGB888 *palette;
 
       uint8_t* frame_buffer_display;
       uint8_t* frame_buffer_back;
@@ -158,5 +172,8 @@ namespace pimoroni {
       int line_bytes_per_pixel;
 
       uint32_t* display_palette = nullptr;
+
+      line_fun_t callback = nullptr;
+      void *cb_data = nullptr;
   };
 }

@@ -29,6 +29,7 @@ using namespace pimoroni;
 #define FRAME_BUFFER_SIZE (640*360)
 __attribute__((section(".uninitialized_data"))) static uint8_t frame_buffer_a[FRAME_BUFFER_SIZE];
 __attribute__((section(".uninitialized_data"))) static uint8_t frame_buffer_b[FRAME_BUFFER_SIZE];
+__attribute__((section(".uninitialized_data"))) RGB888 *global_palette[PALETTE_SIZE];
 #endif
 
 #include "font.h"
@@ -158,7 +159,9 @@ void __scratch_x("display") DVHSTX::gfx_dma_handler() {
             line_num = new_line_num;
             uint32_t* dst_ptr = &line_buffers[line_num * line_buf_total_len + count_of(vactive_line_header)];
 
-            if (line_bytes_per_pixel == 2) {
+            if (callback) {
+                callback(cb_data, y, dst_ptr);
+            } else if (line_bytes_per_pixel == 2) {
                 uint16_t* src_ptr = (uint16_t*)&frame_buffer_display[y * 2 * (timing_mode->h_active_pixels >> h_repeat_shift)];
                 if (h_repeat_shift == 2) {
                     for (int i = 0; i < timing_mode->h_active_pixels >> 1; i += 2) {
@@ -643,8 +646,8 @@ bool DVHSTX::init(uint16_t width, uint16_t height, Mode mode_, Pinout pinout)
     }
     else
     {
-        uint16_t full_width = display_width;
-        uint16_t full_height = display_height;
+        volatile uint16_t full_width = display_width;
+        volatile uint16_t full_height = display_height;
         h_repeat_shift = 0;
         v_repeat_shift = 0;
 
@@ -660,6 +663,9 @@ bool DVHSTX::init(uint16_t width, uint16_t height, Mode mode_, Pinout pinout)
 
         if (full_width == 640) {
             if (full_height == 480) timing_mode = &dvi_timing_640x480p_60hz;
+        }
+        else if (full_width == 1280 && full_height == 720) {
+            timing_mode = &dvi_timing_1280x720p_rb_50hz;
         }
         else if (full_width == 720) {
             if (full_height == 480) timing_mode = &dvi_timing_720x480p_60hz;
@@ -681,11 +687,19 @@ bool DVHSTX::init(uint16_t width, uint16_t height, Mode mode_, Pinout pinout)
 
     if (!timing_mode) {
         dvhstx_debug("Unsupported resolution %dx%d", width, height);
+        __builtin_trap();
         return false;
     }
 
     display = this;
-    display_palette = get_palette();
+    if (mode == MODE_PALETTE) {
+#ifdef MICROPY_BUILD_TYPE
+        palette = global_palette;
+#else
+        palette = (RGB888*)malloc(sizeof(RGB888) * PALETTE_SIZE);
+        display_palette = get_palette();
+#endif
+    }
     
     dvhstx_debug("Setup clock\n");
     display_setup_clock();
@@ -731,6 +745,7 @@ bool DVHSTX::init(uint16_t width, uint16_t height, Mode mode_, Pinout pinout)
         frame_bytes_per_pixel = 1;
         line_bytes_per_pixel = 4;
         break;
+    case MODE_LINE_CALLBACK:
     case MODE_RGB888:
         frame_bytes_per_pixel = 4;
         line_bytes_per_pixel = 4;
@@ -755,14 +770,29 @@ bool DVHSTX::init(uint16_t width, uint16_t height, Mode mode_, Pinout pinout)
 
     frame_buffer_display = frame_buffer_a;
     frame_buffer_back = frame_buffer_b;
+    palette = global_palette;
 #else
-    frame_buffer_display = (uint8_t*)malloc(frame_width * frame_height * frame_bytes_per_pixel);
-    frame_buffer_back = (uint8_t*)malloc(frame_width * frame_height * frame_bytes_per_pixel);
+    if (mode != MODE_LINE_CALLBACK ) {
+        frame_buffer_display = (uint8_t*)malloc(frame_width * frame_height * frame_bytes_per_pixel);
+        frame_buffer_back = (uint8_t*)malloc(frame_width * frame_height * frame_bytes_per_pixel);
+        if (!frame_buffer_display) return false;
+        if (!frame_buffer_back) { free (frame_buffer_display); return false; }
+        if (mode == MODE_PALETTE) {
+            palette = (RGB888*)malloc(sizeof(RGB888) * PALETTE_SIZE);
+            if (!palette)  {
+                free (frame_buffer_display);  
+                free (frame_buffer_back);  
+                return false;
+            }
+        }
+    }
 #endif
-    memset(frame_buffer_display, 0, frame_width * frame_height * frame_bytes_per_pixel);
-    memset(frame_buffer_back, 0, frame_width * frame_height * frame_bytes_per_pixel);
-
-    memset(palette, 0, PALETTE_SIZE * sizeof(palette[0]));
+    if (mode != MODE_LINE_CALLBACK ) {
+        memset(frame_buffer_display, 0, frame_width * frame_height * frame_bytes_per_pixel);
+        memset(frame_buffer_back, 0, frame_width * frame_height * frame_bytes_per_pixel);
+    }
+    if(mode == MODE_PALETTE)
+        memset(palette, 0, PALETTE_SIZE * sizeof(palette[0]));
 
     frame_buffer_display = frame_buffer_display;
     dvhstx_debug("Frame buffers inited\n");
@@ -816,6 +846,7 @@ bool DVHSTX::init(uint16_t width, uint16_t height, Mode mode_, Pinout pinout)
             0 << HSTX_CTRL_EXPAND_SHIFT_RAW_SHIFT_LSB;
         break;
 
+    case MODE_LINE_CALLBACK:
     case MODE_PALETTE:
         // Configure HSTX's TMDS encoder for RGB888
         hstx_ctrl_hw->expand_tmds =
@@ -974,8 +1005,10 @@ bool DVHSTX::init(uint16_t width, uint16_t height, Mode mode_, Pinout pinout)
 
     dvhstx_debug("DVHSTX started\n");
 
-    for (int i = 0; i < frame_height; ++i) {
-        memset(&frame_buffer_display[i * frame_width * frame_bytes_per_pixel], i, frame_width * frame_bytes_per_pixel);
+    if (frame_buffer_display) {
+        for (int i = 0; i < frame_height; ++i) {
+            memset(&frame_buffer_display[i * frame_width * frame_bytes_per_pixel], i, frame_width * frame_bytes_per_pixel);
+        }
     }
 
     dvhstx_debug("Frame buffer filled\n");
@@ -1005,6 +1038,9 @@ void DVHSTX::reset() {
 #ifndef MICROPY_BUILD_TYPE
     free(frame_buffer_display);
     free(frame_buffer_back);
+    if (palette) {
+        free(palette);
+    }
 #endif
 }
 
@@ -1027,4 +1063,8 @@ void DVHSTX::flip_async() {
 
 void DVHSTX::wait_for_flip() {
     while (flip_next) __wfe();
+}
+
+int DVHSTX::get_h_active_pixels() const {
+    return timing_mode->h_active_pixels;
 }
