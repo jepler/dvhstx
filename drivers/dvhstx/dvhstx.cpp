@@ -42,6 +42,7 @@ extern "C" {
 void dvhstx_debug(const char *fmt, ...);
 }
 #else
+#include <stdio.h>
 #define dvhstx_debug printf
 #endif
 
@@ -102,24 +103,6 @@ static const uint32_t vactive_line_header_src[] = {
 };
 static uint32_t vactive_line_header[count_of(vactive_line_header_src)];
 
-static const uint32_t vactive_text_line_header_src[] = {
-    HSTX_CMD_RAW_REPEAT,
-    SYNC_V1_H1,
-    HSTX_CMD_RAW_REPEAT,
-    SYNC_V1_H0,
-    HSTX_CMD_RAW_REPEAT,
-    SYNC_V1_H1,
-    HSTX_CMD_RAW | 6,
-    BLACK_PIXEL_A,
-    BLACK_PIXEL_B,
-    BLACK_PIXEL_A,
-    BLACK_PIXEL_B,
-    BLACK_PIXEL_A,
-    BLACK_PIXEL_B,
-    HSTX_CMD_TMDS
-};
-static uint32_t vactive_text_line_header[count_of(vactive_text_line_header_src)];
-
 #define NUM_FRAME_LINES 2
 #define NUM_CHANS 3
 
@@ -161,56 +144,6 @@ void __scratch_x("display") DVHSTX::gfx_dma_handler() {
 
             if (callback) {
                 callback(cb_data, y, dst_ptr);
-            } else if (line_bytes_per_pixel == 2) {
-                uint16_t* src_ptr = (uint16_t*)&frame_buffer_display[y * 2 * (timing_mode->h_active_pixels >> h_repeat_shift)];
-                if (h_repeat_shift == 2) {
-                    for (int i = 0; i < timing_mode->h_active_pixels >> 1; i += 2) {
-                        uint32_t val = (uint32_t)(*src_ptr++) * 0x10001;
-                        *dst_ptr++ = val;
-                        *dst_ptr++ = val;
-                    }
-                }
-                else {
-                    for (int i = 0; i < timing_mode->h_active_pixels >> 1; ++i) {
-                        uint32_t val = (uint32_t)(*src_ptr++) * 0x10001;
-                        *dst_ptr++ = val;
-                    }
-                }
-            }
-            else if (line_bytes_per_pixel == 1) {
-                uint8_t* src_ptr = &frame_buffer_display[y * (timing_mode->h_active_pixels >> h_repeat_shift)];
-                if (h_repeat_shift == 2) {
-                    for (int i = 0; i < timing_mode->h_active_pixels >> 2; ++i) {
-                        uint32_t val = (uint32_t)(*src_ptr++) * 0x01010101;
-                        *dst_ptr++ = val;
-                    }                
-                }
-                else {
-                    for (int i = 0; i < timing_mode->h_active_pixels >> 2; ++i) {
-                        uint32_t val = ((uint32_t)(*src_ptr++) * 0x0101);
-                        val |= ((uint32_t)(*src_ptr++) * 0x01010000);
-                        *dst_ptr++ = val;
-                    }
-                }
-            }
-            else if (line_bytes_per_pixel == 4) {
-                uint8_t* src_ptr = &frame_buffer_display[y * (timing_mode->h_active_pixels >> h_repeat_shift)];
-                if (h_repeat_shift == 2) {
-                    for (int i = 0; i < timing_mode->h_active_pixels; i += 4) {
-                        uint32_t val = display_palette[*src_ptr++];
-                        *dst_ptr++ = val;
-                        *dst_ptr++ = val;
-                        *dst_ptr++ = val;
-                        *dst_ptr++ = val;
-                    }
-                }
-                else {
-                    for (int i = 0; i < timing_mode->h_active_pixels; i += 2) {
-                        uint32_t val = display_palette[*src_ptr++];
-                        *dst_ptr++ = val;
-                        *dst_ptr++ = val;
-                    }
-                }
             }
         }
     }
@@ -218,192 +151,6 @@ void __scratch_x("display") DVHSTX::gfx_dma_handler() {
     if (++v_scanline == v_total_active_lines) {
         v_scanline = 0;
         line_num = -1;
-        if (flip_next) {
-            flip_next = false;
-            display->flip_now();
-        }
-        __sev();
-    }
-}
-
-void __scratch_x("display") dma_irq_handler_text() {
-    display->text_dma_handler();
-}
-
-void __scratch_x("display") DVHSTX::text_dma_handler() {
-    // ch_num indicates the channel that just finished, which is the one
-    // we're about to reload.
-    dma_channel_hw_t *ch = &dma_hw->ch[ch_num];
-    dma_hw->intr = 1u << ch_num;
-    if (++ch_num == NUM_CHANS) ch_num = 0;
-
-    if (v_scanline >= timing_mode->v_front_porch && v_scanline < (timing_mode->v_front_porch + timing_mode->v_sync_width)) {
-        ch->read_addr = (uintptr_t)vblank_line_vsync_on;
-        ch->transfer_count = count_of(vblank_line_vsync_on);
-    } else if (v_scanline < v_inactive_total) {
-        ch->read_addr = (uintptr_t)vblank_line_vsync_off;
-        ch->transfer_count = count_of(vblank_line_vsync_off);
-    } else {
-        const int y = (v_scanline - v_inactive_total);
-        const uint line_buf_total_len = (frame_width * line_bytes_per_pixel + 3) / 4 + count_of(vactive_text_line_header);
-
-        ch->read_addr = (uintptr_t)&line_buffers[ch_num * line_buf_total_len];
-        ch->transfer_count = line_buf_total_len;
-
-        // Fill line buffer
-        int char_y = y % 24;
-        if (line_bytes_per_pixel == 4) {
-            uint32_t* dst_ptr = &line_buffers[ch_num * line_buf_total_len + count_of(vactive_text_line_header)];
-            uint8_t* src_ptr = &frame_buffer_display[(y / 24) * frame_width];
-            for (int i = 0; i < frame_width; ++i) {
-                *dst_ptr++ = render_char_line(*src_ptr++, char_y);
-            }
-        }
-        else {
-            uint8_t* dst_ptr = (uint8_t*)&line_buffers[ch_num * line_buf_total_len + count_of(vactive_text_line_header)];
-            uint8_t* src_ptr = &frame_buffer_display[(y / 24) * frame_width];
-            uint8_t* colour_ptr = src_ptr + frame_width * frame_height;
-#ifdef __riscv
-            for (int i = 0; i < frame_width; ++i) {
-                const uint8_t c = (*src_ptr++ - 0x20);
-                uint32_t bits = (c < 95) ? font_cache[c * 24 + char_y] : 0;
-                const uint8_t colour = *colour_ptr++;
-
-                *dst_ptr++ = colour * ((bits >> 24) & 3);
-                *dst_ptr++ = colour * ((bits >> 22) & 3);
-                *dst_ptr++ = colour * ((bits >> 20) & 3);
-                *dst_ptr++ = colour * ((bits >> 18) & 3);
-                *dst_ptr++ = colour * ((bits >> 16) & 3);
-                *dst_ptr++ = colour * ((bits >> 14) & 3);
-                *dst_ptr++ = colour * ((bits >> 12) & 3);
-                *dst_ptr++ = colour * ((bits >> 10) & 3);
-                *dst_ptr++ = colour * ((bits >> 8) & 3);
-                *dst_ptr++ = colour * ((bits >> 6) & 3);
-                *dst_ptr++ = colour * ((bits >> 4) & 3);
-                *dst_ptr++ = colour * ((bits >> 2) & 3);
-                *dst_ptr++ = colour * (bits & 3);
-                *dst_ptr++ = 0;
-            }
-#else
-            int i = 0;
-            for (; i < frame_width-1; i += 2) {
-                uint8_t c = (*src_ptr++ - 0x20);
-                uint32_t bits = (c < 95) ? font_cache[c * 24 + char_y] : 0;
-                uint8_t colour = *colour_ptr++;
-                c = (*src_ptr++ - 0x20);
-                uint32_t bits2 = (c < 95) ? font_cache[c * 24 + char_y] : 0;
-                uint8_t colour2 = *colour_ptr++;
-
-                // This ASM works around a compiler bug where the optimizer decides
-                // to unroll so hard it spills to the stack.
-                uint32_t tmp, tmp2;
-                asm volatile (
-                    "ubfx %[tmp], %[cbits], #24, #2\n\t"
-                    "ubfx %[tmp2], %[cbits], #22, #2\n\t"
-                    "bfi %[tmp], %[tmp2], #8, #8\n\t"
-                    "ubfx %[tmp2], %[cbits], #20, #2\n\t"
-                    "bfi %[tmp], %[tmp2], #16, #8\n\t"
-                    "ubfx %[tmp2], %[cbits], #18, #2\n\t"
-                    "bfi %[tmp], %[tmp2], #24, #8\n\t"
-                    "muls %[tmp], %[colour], %[tmp]\n\t"
-                    "str %[tmp], [%[dst_ptr]]\n\t"
-
-                    "ubfx %[tmp], %[cbits], #16, #2\n\t"
-                    "ubfx %[tmp2], %[cbits], #14, #2\n\t"
-                    "bfi %[tmp], %[tmp2], #8, #8\n\t"
-                    "ubfx %[tmp2], %[cbits], #12, #2\n\t"
-                    "bfi %[tmp], %[tmp2], #16, #8\n\t"
-                    "ubfx %[tmp2], %[cbits], #10, #2\n\t"
-                    "bfi %[tmp], %[tmp2], #24, #8\n\t"
-                    "muls %[tmp], %[colour], %[tmp]\n\t"
-                    "str %[tmp], [%[dst_ptr], #4]\n\t"
-
-                    "ubfx %[tmp], %[cbits], #8, #2\n\t"
-                    "ubfx %[tmp2], %[cbits], #6, #2\n\t"
-                    "bfi %[tmp], %[tmp2], #8, #8\n\t"
-                    "ubfx %[tmp2], %[cbits], #4, #2\n\t"
-                    "bfi %[tmp], %[tmp2], #16, #8\n\t"
-                    "ubfx %[tmp2], %[cbits], #2, #2\n\t"
-                    "bfi %[tmp], %[tmp2], #24, #8\n\t"
-                    "muls %[tmp], %[colour], %[tmp]\n\t"
-                    "str %[tmp], [%[dst_ptr], #8]\n\t"
-
-                    "ubfx %[tmp], %[cbits2], #24, #2\n\t"
-                    "ubfx %[tmp2], %[cbits2], #22, #2\n\t"
-                    "bfi %[tmp], %[tmp2], #8, #8\n\t"
-                    "muls %[tmp], %[colour2], %[tmp]\n\t"
-                    "and %[tmp2], %[cbits], #3\n\t"
-                    "muls %[tmp2], %[colour], %[tmp2]\n\t"
-                    "bfi %[tmp2], %[tmp], #16, #16\n\t"
-                    "str %[tmp2], [%[dst_ptr], #12]\n\t"
-
-                    "ubfx %[tmp], %[cbits2], #20, #2\n\t"
-                    "ubfx %[tmp2], %[cbits2], #18, #2\n\t"
-                    "bfi %[tmp], %[tmp2], #8, #8\n\t"
-                    "ubfx %[tmp2], %[cbits2], #16, #2\n\t"
-                    "bfi %[tmp], %[tmp2], #16, #8\n\t"
-                    "ubfx %[tmp2], %[cbits2], #14, #2\n\t"
-                    "bfi %[tmp], %[tmp2], #24, #8\n\t"
-                    "muls %[tmp], %[colour2], %[tmp]\n\t"
-                    "str %[tmp], [%[dst_ptr], #16]\n\t"
-
-                    "ubfx %[tmp], %[cbits2], #12, #2\n\t"
-                    "ubfx %[tmp2], %[cbits2], #10, #2\n\t"
-                    "bfi %[tmp], %[tmp2], #8, #8\n\t"
-                    "ubfx %[tmp2], %[cbits2], #8, #2\n\t"
-                    "bfi %[tmp], %[tmp2], #16, #8\n\t"
-                    "ubfx %[tmp2], %[cbits2], #6, #2\n\t"
-                    "bfi %[tmp], %[tmp2], #24, #8\n\t"
-                    "muls %[tmp], %[colour2], %[tmp]\n\t"
-                    "str %[tmp], [%[dst_ptr], #20]\n\t"
-
-                    "ubfx %[tmp], %[cbits2], #4, #2\n\t"
-                    "ubfx %[tmp2], %[cbits2], #2, #2\n\t"
-                    "bfi %[tmp], %[tmp2], #8, #8\n\t"
-                    "bfi %[tmp], %[cbits2], #16, #2\n\t"
-                    "muls %[tmp], %[colour2], %[tmp]\n\t"
-                    "str %[tmp], [%[dst_ptr], #24]\n\t"
-                    : [tmp] "=&l" (tmp),
-                      [tmp2] "=&l" (tmp2)
-                    : [cbits] "r" (bits),
-                      [colour] "l" (colour),
-                      [cbits2] "r" (bits2),
-                      [colour2] "l" (colour2),
-                      [dst_ptr] "r" (dst_ptr)
-                    : "cc", "memory" );
-                dst_ptr += 14 * 2;                
-            }
-            if (i != frame_width) {
-                const uint8_t c = (*src_ptr++ - 0x20);
-                uint32_t bits = (c < 95) ? font_cache[c * 24 + char_y] : 0;
-                const uint8_t colour = *colour_ptr++;
-
-                *dst_ptr++ = colour * ((bits >> 24) & 3);
-                *dst_ptr++ = colour * ((bits >> 22) & 3);
-                *dst_ptr++ = colour * ((bits >> 20) & 3);
-                *dst_ptr++ = colour * ((bits >> 18) & 3);
-                *dst_ptr++ = colour * ((bits >> 16) & 3);
-                *dst_ptr++ = colour * ((bits >> 14) & 3);
-                *dst_ptr++ = colour * ((bits >> 12) & 3);
-                *dst_ptr++ = colour * ((bits >> 10) & 3);
-                *dst_ptr++ = colour * ((bits >> 8) & 3);
-                *dst_ptr++ = colour * ((bits >> 6) & 3);
-                *dst_ptr++ = colour * ((bits >> 4) & 3);
-                *dst_ptr++ = colour * ((bits >> 2) & 3);
-                *dst_ptr++ = colour * (bits & 3);
-                *dst_ptr++ = 0;
-            }
-#endif
-        }
-    }
-
-    if (++v_scanline == v_total_active_lines) {
-        v_scanline = 0;
-        line_num = -1;
-        if (flip_next) {
-            flip_next = false;
-            display->flip_now();
-        }
         __sev();
     }
 }
@@ -522,80 +269,6 @@ void DVHSTX::display_setup_clock() {
                     freq, freq);
 }
 
-void DVHSTX::write_pixel(const Point &p, uint16_t colour)
-{
-    *point_to_ptr16(p) = colour;
-}
-
-void DVHSTX::write_pixel_span(const Point &p, uint l, uint16_t colour)
-{
-    uint16_t* ptr = point_to_ptr16(p);
-    for (uint i = 0; i < l; ++i) ptr[i] = colour;
-}
-
-void DVHSTX::write_pixel_span(const Point &p, uint l, uint16_t *data)
-{
-    uint16_t* ptr = point_to_ptr16(p);
-    for (uint i = 0; i < l; ++i) ptr[i] = data[i];
-}
-
-void DVHSTX::read_pixel_span(const Point &p, uint l, uint16_t *data)
-{
-    const uint16_t* ptr = point_to_ptr16(p);
-    for (uint i = 0; i < l; ++i) data[i] = ptr[i];
-}
-
-void DVHSTX::set_palette(RGB888 new_palette[PALETTE_SIZE])
-{
-    memcpy(palette, new_palette, PALETTE_SIZE * sizeof(RGB888));
-}
-
-void DVHSTX::set_palette_colour(uint8_t entry, RGB888 colour)
-{
-    palette[entry] = colour;
-}
-
-RGB888* DVHSTX::get_palette()
-{
-    return palette;
-}
-
-void DVHSTX::write_palette_pixel(const Point &p, uint8_t colour)
-{
-    *point_to_ptr_palette(p) = colour;
-}
-
-void DVHSTX::write_palette_pixel_span(const Point &p, uint l, uint8_t colour)
-{
-    uint8_t* ptr = point_to_ptr_palette(p);
-    memset(ptr, colour, l);
-}
-
-void DVHSTX::write_palette_pixel_span(const Point &p, uint l, uint8_t* data)
-{
-    uint8_t* ptr = point_to_ptr_palette(p);
-    memcpy(ptr, data, l);
-}
-
-void DVHSTX::read_palette_pixel_span(const Point &p, uint l, uint8_t *data)
-{
-    const uint8_t* ptr = point_to_ptr_palette(p);
-    memcpy(data, ptr, l);
-}
-
-void DVHSTX::write_text(const Point &p, const char* text, TextColour colour, bool immediate)
-{
-    char* ptr = (char*)point_to_ptr_text(p, immediate);
-    int len = std::min((int)(frame_width - p.x), (int)strlen(text));
-    memcpy(ptr, text, len);
-    if (mode == MODE_TEXT_RGB111) memset(ptr + frame_width * frame_height, (uint8_t)colour, len);
-}
-
-void DVHSTX::clear()
-{
-    memset(frame_buffer_back, 0, frame_width * frame_height * frame_bytes_per_pixel);
-}
-
 DVHSTX::DVHSTX()
 {
     // Always use the bottom channels
@@ -609,7 +282,6 @@ bool DVHSTX::init(uint16_t width, uint16_t height, Mode mode_, Pinout pinout)
     ch_num = 0;
     line_num = -1;
     v_scanline = 2;
-    flip_next = false;
 
     display_width = width;
     display_height = height;
@@ -618,18 +290,7 @@ bool DVHSTX::init(uint16_t width, uint16_t height, Mode mode_, Pinout pinout)
     mode = mode_;
 
     timing_mode = nullptr;
-    if (mode == MODE_TEXT_MONO || mode == MODE_TEXT_RGB111) {
-        width = 1280;
-        height = 720;
-        display_width = 91;
-        frame_width = 91;
-        display_height = 30;
-        frame_height = 30;
-        h_repeat_shift = 0;
-        v_repeat_shift = 0;
-        timing_mode = &dvi_timing_1280x720p_rb_50hz;
-    }
-    else if (width == 320 && height == 180) {
+    if (width == 320 && height == 180) {
         h_repeat_shift = 2;
         v_repeat_shift = 2;
         timing_mode = &dvi_timing_1280x720p_rb_50hz;
@@ -692,14 +353,6 @@ bool DVHSTX::init(uint16_t width, uint16_t height, Mode mode_, Pinout pinout)
     }
 
     display = this;
-    if (mode == MODE_PALETTE) {
-#ifdef MICROPY_BUILD_TYPE
-        palette = global_palette;
-#else
-        palette = (RGB888*)malloc(sizeof(RGB888) * PALETTE_SIZE);
-        display_palette = get_palette();
-#endif
-    }
     
     dvhstx_debug("Setup clock\n");
     display_setup_clock();
@@ -730,94 +383,28 @@ bool DVHSTX::init(uint16_t width, uint16_t height, Mode mode_, Pinout pinout)
     vactive_line_header[4] |= timing_mode->h_back_porch;
     vactive_line_header[6] |= timing_mode->h_active_pixels;
 
-    memcpy(vactive_text_line_header, vactive_text_line_header_src, sizeof(vactive_text_line_header_src));
-    vactive_text_line_header[0] |= timing_mode->h_front_porch;
-    vactive_text_line_header[2] |= timing_mode->h_sync_width;
-    vactive_text_line_header[4] |= timing_mode->h_back_porch;
-    vactive_text_line_header[7+6] |= timing_mode->h_active_pixels - 6;
-
     switch (mode) {
-    case MODE_RGB565:
+    case MODE_LINE_CALLBACK_RGB565:
         frame_bytes_per_pixel = 2;
         line_bytes_per_pixel = 2;
         break;
-    case MODE_PALETTE:
-        frame_bytes_per_pixel = 1;
-        line_bytes_per_pixel = 4;
-        break;
-    case MODE_LINE_CALLBACK:
-    case MODE_RGB888:
+    case MODE_LINE_CALLBACK_RGB888:
         frame_bytes_per_pixel = 4;
         line_bytes_per_pixel = 4;
-        break;
-    case MODE_TEXT_MONO:
-        frame_bytes_per_pixel = 1;
-        line_bytes_per_pixel = 4;
-        break;
-    case MODE_TEXT_RGB111:
-        frame_bytes_per_pixel = 2;
-        line_bytes_per_pixel = 14;
         break;
     default:
         dvhstx_debug("Unsupported mode %d", (int)mode);
         return false;
     }
 
-#ifdef MICROPY_BUILD_TYPE
-    if (frame_width * frame_height * frame_bytes_per_pixel > sizeof(frame_buffer_a)) {
-        panic("Frame buffer too large");
-    }
-
-    frame_buffer_display = frame_buffer_a;
-    frame_buffer_back = frame_buffer_b;
-    palette = global_palette;
-#else
-    if (mode != MODE_LINE_CALLBACK ) {
-        frame_buffer_display = (uint8_t*)malloc(frame_width * frame_height * frame_bytes_per_pixel);
-        frame_buffer_back = (uint8_t*)malloc(frame_width * frame_height * frame_bytes_per_pixel);
-        if (!frame_buffer_display) return false;
-        if (!frame_buffer_back) { free (frame_buffer_display); return false; }
-        if (mode == MODE_PALETTE) {
-            palette = (RGB888*)malloc(sizeof(RGB888) * PALETTE_SIZE);
-            if (!palette)  {
-                free (frame_buffer_display);  
-                free (frame_buffer_back);  
-                return false;
-            }
-        }
-    }
-#endif
-    if (mode != MODE_LINE_CALLBACK ) {
-        memset(frame_buffer_display, 0, frame_width * frame_height * frame_bytes_per_pixel);
-        memset(frame_buffer_back, 0, frame_width * frame_height * frame_bytes_per_pixel);
-    }
-    if(mode == MODE_PALETTE)
-        memset(palette, 0, PALETTE_SIZE * sizeof(palette[0]));
-
-    frame_buffer_display = frame_buffer_display;
-    dvhstx_debug("Frame buffers inited\n");
-
-    const bool is_text_mode = (mode == MODE_TEXT_MONO || mode == MODE_TEXT_RGB111);
     const int frame_pixel_words = (frame_width * h_repeat * line_bytes_per_pixel + 3) >> 2;
-    const int frame_line_words = frame_pixel_words + (is_text_mode ? count_of(vactive_text_line_header) : count_of(vactive_line_header));
+    const int frame_line_words = frame_pixel_words + count_of(vactive_line_header);
     const int frame_lines = (v_repeat == 1) ? NUM_CHANS : NUM_FRAME_LINES;
     line_buffers = (uint32_t*)malloc(frame_line_words * 4 * frame_lines);
 
     for (int i = 0; i < frame_lines; ++i)
     {
-        if (is_text_mode) memcpy(&line_buffers[i * frame_line_words], vactive_text_line_header, count_of(vactive_text_line_header) * sizeof(uint32_t));
-        else memcpy(&line_buffers[i * frame_line_words], vactive_line_header, count_of(vactive_line_header) * sizeof(uint32_t));
-    }
-
-    if (mode == MODE_TEXT_RGB111) {
-        // Need to pre-render the font to RAM to be fast enough.
-        font_cache = (uint32_t*)malloc(4 * FONT->line_height * 95);
-        uint32_t* font_cache_ptr = font_cache;
-        for (int c = 0x20; c < 128; ++c) {
-            for (int y = 0; y < FONT->line_height; ++y) {
-                *font_cache_ptr++ = render_char_line(c, y);
-            }
-        }
+        memcpy(&line_buffers[i * frame_line_words], vactive_line_header, count_of(vactive_line_header) * sizeof(uint32_t));
     }
 
     // Ensure HSTX FIFO is clear
@@ -827,7 +414,7 @@ bool DVHSTX::init(uint16_t width, uint16_t height, Mode mode_, Pinout pinout)
     sleep_us(10);
 
     switch (mode) {
-    case MODE_RGB565:
+    case MODE_LINE_CALLBACK_RGB565:
         // Configure HSTX's TMDS encoder for RGB565
         hstx_ctrl_hw->expand_tmds =
             4  << HSTX_CTRL_EXPAND_TMDS_L2_NBITS_LSB |
@@ -846,8 +433,7 @@ bool DVHSTX::init(uint16_t width, uint16_t height, Mode mode_, Pinout pinout)
             0 << HSTX_CTRL_EXPAND_SHIFT_RAW_SHIFT_LSB;
         break;
 
-    case MODE_LINE_CALLBACK:
-    case MODE_PALETTE:
+    case MODE_LINE_CALLBACK_RGB888:
         // Configure HSTX's TMDS encoder for RGB888
         hstx_ctrl_hw->expand_tmds =
             7  << HSTX_CTRL_EXPAND_TMDS_L2_NBITS_LSB |
@@ -862,44 +448,6 @@ bool DVHSTX::init(uint16_t width, uint16_t height, Mode mode_, Pinout pinout)
         hstx_ctrl_hw->expand_shift =
             1 << HSTX_CTRL_EXPAND_SHIFT_ENC_N_SHIFTS_LSB |
             0 << HSTX_CTRL_EXPAND_SHIFT_ENC_SHIFT_LSB |
-            1 << HSTX_CTRL_EXPAND_SHIFT_RAW_N_SHIFTS_LSB |
-            0 << HSTX_CTRL_EXPAND_SHIFT_RAW_SHIFT_LSB;
-        break;
-
-    case MODE_TEXT_MONO:
-        // Configure HSTX's TMDS encoder for 2bpp
-        hstx_ctrl_hw->expand_tmds =
-            1  << HSTX_CTRL_EXPAND_TMDS_L2_NBITS_LSB |
-            18 << HSTX_CTRL_EXPAND_TMDS_L2_ROT_LSB   |
-            1  << HSTX_CTRL_EXPAND_TMDS_L1_NBITS_LSB |
-            18  << HSTX_CTRL_EXPAND_TMDS_L1_ROT_LSB   |
-            1  << HSTX_CTRL_EXPAND_TMDS_L0_NBITS_LSB |
-            18  << HSTX_CTRL_EXPAND_TMDS_L0_ROT_LSB;
-
-        // Pixels and control symbols (RAW) are an
-        // entire 32-bit word.
-        hstx_ctrl_hw->expand_shift =
-            14 << HSTX_CTRL_EXPAND_SHIFT_ENC_N_SHIFTS_LSB |
-            30 << HSTX_CTRL_EXPAND_SHIFT_ENC_SHIFT_LSB |
-            1 << HSTX_CTRL_EXPAND_SHIFT_RAW_N_SHIFTS_LSB |
-            0 << HSTX_CTRL_EXPAND_SHIFT_RAW_SHIFT_LSB;
-        break;
-
-    case MODE_TEXT_RGB111:
-        // Configure HSTX's TMDS encoder for RGB222
-        hstx_ctrl_hw->expand_tmds =
-            1  << HSTX_CTRL_EXPAND_TMDS_L2_NBITS_LSB |
-            0 << HSTX_CTRL_EXPAND_TMDS_L2_ROT_LSB   |
-            1  << HSTX_CTRL_EXPAND_TMDS_L1_NBITS_LSB |
-            29  << HSTX_CTRL_EXPAND_TMDS_L1_ROT_LSB   |
-            1  << HSTX_CTRL_EXPAND_TMDS_L0_NBITS_LSB |
-            26 << HSTX_CTRL_EXPAND_TMDS_L0_ROT_LSB;
-
-        // Pixels (TMDS) come in 4 8-bit chunks. Control symbols (RAW) are an
-        // entire 32-bit word.
-        hstx_ctrl_hw->expand_shift =
-            4 << HSTX_CTRL_EXPAND_SHIFT_ENC_N_SHIFTS_LSB |
-            8 << HSTX_CTRL_EXPAND_SHIFT_ENC_SHIFT_LSB |
             1 << HSTX_CTRL_EXPAND_SHIFT_RAW_N_SHIFTS_LSB |
             0 << HSTX_CTRL_EXPAND_SHIFT_RAW_SHIFT_LSB;
         break;
@@ -997,21 +545,12 @@ bool DVHSTX::init(uint16_t width, uint16_t height, Mode mode_, Pinout pinout)
     dma_hw->intr = (1 << NUM_CHANS) - 1;
     dma_hw->ints2 = (1 << NUM_CHANS) - 1;
     dma_hw->inte2 = (1 << NUM_CHANS) - 1;
-    if (is_text_mode) irq_set_exclusive_handler(DMA_IRQ_2, dma_irq_handler_text);
-    else irq_set_exclusive_handler(DMA_IRQ_2, dma_irq_handler);
+    irq_set_exclusive_handler(DMA_IRQ_2, dma_irq_handler);
     irq_set_enabled(DMA_IRQ_2, true);
 
     dma_channel_start(0);
 
     dvhstx_debug("DVHSTX started\n");
-
-    if (frame_buffer_display) {
-        for (int i = 0; i < frame_height; ++i) {
-            memset(&frame_buffer_display[i * frame_width * frame_bytes_per_pixel], i, frame_width * frame_bytes_per_pixel);
-        }
-    }
-
-    dvhstx_debug("Frame buffer filled\n");
 
     inited = true;
     return true;
@@ -1029,40 +568,7 @@ void DVHSTX::reset() {
     for (int i = 0; i < NUM_CHANS; ++i)
         dma_channel_abort(i);
 
-    if (font_cache) {
-        free(font_cache);
-        font_cache = nullptr;
-    }
     free(line_buffers);
-
-#ifndef MICROPY_BUILD_TYPE
-    free(frame_buffer_display);
-    free(frame_buffer_back);
-    if (palette) {
-        free(palette);
-    }
-#endif
-}
-
-void DVHSTX::flip_blocking() {
-    wait_for_vsync();
-    flip_now();
-}
-
-void DVHSTX::flip_now() {
-    std::swap(frame_buffer_display, frame_buffer_back);
-}
-
-void DVHSTX::wait_for_vsync() {
-    while (v_scanline >= timing_mode->v_front_porch) __wfe();
-}
-
-void DVHSTX::flip_async() {
-    flip_next = true;
-}
-
-void DVHSTX::wait_for_flip() {
-    while (flip_next) __wfe();
 }
 
 int DVHSTX::get_h_active_pixels() const {

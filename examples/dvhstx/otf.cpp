@@ -45,7 +45,8 @@ void gen_line(void *cb_data, int line_num, uint32_t *dest) {
 }
 
 int main() {
-    display.init(FRAME_WIDTH, FRAME_HEIGHT, gen_line, &display, {13, 15, 17, 19});
+    display.set_callbacks(gen_line, &display);
+    display.init(FRAME_WIDTH, FRAME_HEIGHT, MODE_LINE_CALLBACK_RGB565, {13, 15, 17, 19});
     init_palette();
 
     while(true) {
