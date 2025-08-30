@@ -151,7 +151,7 @@ void __scratch_x("display") DVHSTX::gfx_dma_handler() {
     if (++v_scanline == v_total_active_lines) {
         v_scanline = 0;
         line_num = -1;
-        __sev();
+        //__sev();
     }
 }
 
@@ -457,15 +457,8 @@ bool DVHSTX::init(uint16_t width, uint16_t height, Mode mode_, Pinout pinout)
         return false;
     }
 
-    // Serial output config: clock period of 5 cycles, pop from command
-    // expander every 5 cycles, shift the output shiftreg by 2 every cycle.
+    // disable hstx peripheral ... we'll enable it in a second
     hstx_ctrl_hw->csr = 0;
-    hstx_ctrl_hw->csr =
-        HSTX_CTRL_CSR_EXPAND_EN_BITS |
-        5u << HSTX_CTRL_CSR_CLKDIV_LSB |
-        5u << HSTX_CTRL_CSR_N_SHIFTS_LSB |
-        2u << HSTX_CTRL_CSR_SHIFT_LSB |
-        HSTX_CTRL_CSR_EN_BITS; 
 
     // HSTX outputs 0 through 7 appear on GPIO 12 through 19.
     constexpr int HSTX_FIRST_PIN = 12;
@@ -495,6 +488,16 @@ bool DVHSTX::init(uint16_t width, uint16_t height, Mode mode_, Pinout pinout)
         gpio_set_function(i, GPIO_FUNC_HSTX);
         gpio_set_drive_strength(i, GPIO_DRIVE_STRENGTH_4MA);
     }
+
+    // Serial output config: clock period of 5 cycles, pop from command
+    // expander every 5 cycles, shift the output shiftreg by 2 every cycle.
+    hstx_ctrl_hw->csr = 0;
+    hstx_ctrl_hw->csr =
+        HSTX_CTRL_CSR_EXPAND_EN_BITS |
+        5u << HSTX_CTRL_CSR_CLKDIV_LSB |
+        5u << HSTX_CTRL_CSR_N_SHIFTS_LSB |
+        2u << HSTX_CTRL_CSR_SHIFT_LSB |
+        HSTX_CTRL_CSR_EN_BITS; 
 
     dvhstx_debug("GPIO configured\n");
 
@@ -542,9 +545,9 @@ bool DVHSTX::init(uint16_t width, uint16_t height, Mode mode_, Pinout pinout)
 
     dvhstx_debug("DMA channels claimed\n");
 
-    dma_hw->intr = (1 << NUM_CHANS) - 1;
-    dma_hw->ints2 = (1 << NUM_CHANS) - 1;
-    dma_hw->inte2 = (1 << NUM_CHANS) - 1;
+    dma_hw->intr |= (1 << NUM_CHANS) - 1;
+    dma_hw->ints2 |= (1 << NUM_CHANS) - 1;
+    dma_hw->inte2 |= (1 << NUM_CHANS) - 1;
     irq_set_exclusive_handler(DMA_IRQ_2, dma_irq_handler);
     irq_set_enabled(DMA_IRQ_2, true);
 

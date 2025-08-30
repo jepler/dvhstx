@@ -3,7 +3,6 @@
 #include "hardware/uart.h"
 #include "pico/multicore.h"
 #include "drivers/dvhstx/dvhstx.hpp"
-#include "libraries/pico_graphics/pico_graphics_dvhstx.hpp"
 
 extern "C" {
 #include "mandelf.h"
@@ -15,7 +14,6 @@ using namespace pimoroni;
 #define FRAME_HEIGHT 240
 
 static DVHSTX display;
-static PicoGraphics_PenDVHSTX_P8 graphics(FRAME_WIDTH, FRAME_HEIGHT, display);
 
 inline constexpr uint32_t RGB_to_RGB888(const uint8_t r, const uint8_t g, const uint8_t b) {
     return ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
@@ -36,7 +34,7 @@ static void init_palette() {
 void gen_line(void *cb_data, int line_num, uint32_t *dest) {
     int y1 = line_num - FRAME_HEIGHT / 2;
     int ysq = y1*y1 * 4;
-    for(int h=0; h<FRAME_WIDTH; h++) {
+    for(int h=0; h<FRAME_WIDTH/2; h++) {
         int x = h - FRAME_WIDTH / 2;
         int r2 = x*x + ysq;
         #define LIM (320*320)
@@ -45,8 +43,8 @@ void gen_line(void *cb_data, int line_num, uint32_t *dest) {
 }
 
 int main() {
-    display.set_callbacks(gen_line, &display);
-    display.init(FRAME_WIDTH, FRAME_HEIGHT, MODE_LINE_CALLBACK_RGB565, {13, 15, 17, 19});
+    display.set_callback(gen_line, &display);
+    display.init(FRAME_WIDTH, FRAME_HEIGHT, DVHSTX::MODE_LINE_CALLBACK_RGB565, {13, 15, 17, 19});
     init_palette();
 
     while(true) {
