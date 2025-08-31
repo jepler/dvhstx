@@ -2,8 +2,11 @@
 
 #include <string.h>
 
-#include "pico/stdlib.h"
+#include "drivers/dvhstx/dvhstx.h"
+
 #include "hardware/gpio.h"
+#include "pico/stdlib.h"
+#include "pico/util/queue.h"
 
 // DVI HSTX driver for use with Pimoroni PicoGraphics
 
@@ -31,8 +34,8 @@ namespace pimoroni {
     };
 
     enum Mode {
-      MODE_LINE_CALLBACK_RGB565,
-      MODE_LINE_CALLBACK_RGB888,
+      MODE_RGB565_H2X, // pixels are horizontally doubled
+      MODE_RGB888,
     };
 
     enum TextColour {
@@ -56,23 +59,19 @@ namespace pimoroni {
     uint16_t display_height = 180;
     uint16_t frame_width = 320;
     uint16_t frame_height = 180;
-    uint8_t frame_bytes_per_pixel = 2;
     uint8_t h_repeat = 4;
     uint8_t v_repeat = 4;
-    Mode mode = MODE_LINE_CALLBACK_RGB565;
+    Mode mode = MODE_RGB565_H2X;
 
   public:
     DVHSTX();
 
+    using line_fun_t = dvhstx_line_fun_t;
+    using line_data_t = dvhstx_line_data_t;
     //--------------------------------------------------
     // Methods
     //--------------------------------------------------
     public:
-      typedef void(*line_fun_t)(void *cb_data, int line_num, uint32_t *data); 
-      void set_callback(line_fun_t cb, void *data) {
-        callback = cb;
-        cb_data = data;
-      }
       bool init(uint16_t width, uint16_t height, Mode mode, Pinout pinout);
       void reset();
 
@@ -82,7 +81,30 @@ namespace pimoroni {
       // DMA handlers, should not be called externally
       void gfx_dma_handler(); 
 
+private:
+      line_data_t lines[3];
+      int queue_physical_line, queue_logical_line;
+      bool started;
+      volatile int underflow_count;
+
+      line_data_t *cur_line;
+
+      uint32_t dma_ctrl_meta;
+      uint32_t dma_ctrl_data;
+public:
+      line_data_t *try_get_empty_line();
+
+      void put_filled_line(line_data_t *line);
+
     private:
+      line_data_t *try_get_filled_line();
+
+      void put_empty_line(line_data_t *line) {
+        uint8_t result = line - lines;
+        queue_add_blocking(&empty_line_queue, &result);
+      }
+      queue_t empty_line_queue;
+      queue_t filled_line_queue;
 
       void display_setup_clock();
 
@@ -90,14 +112,14 @@ namespace pimoroni {
       uint ch_num = 0;
       int line_num = -1;
 
-      volatile int v_scanline = 2;
-
       bool inited = false;
 
       uint32_t* line_buffers;
       const struct dvi_timing* timing_mode;
       int v_inactive_total;
-      int v_total_active_lines;
+      int v_total_lines;
+      int v_active_lines;
+      volatile int v_scanline;
 
       uint h_repeat_shift;
       uint v_repeat_shift;

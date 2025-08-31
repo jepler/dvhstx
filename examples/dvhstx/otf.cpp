@@ -1,3 +1,4 @@
+#define PICO_DEFAULT_UART_RX_PIN 45 
 
 #include <stdio.h>
 #include "hardware/uart.h"
@@ -8,10 +9,11 @@ extern "C" {
 #include "mandelf.h"
 }
 
+
 using namespace pimoroni;
 
 #define FRAME_WIDTH 640
-#define FRAME_HEIGHT 240
+#define FRAME_HEIGHT 480
 
 static DVHSTX display;
 
@@ -31,22 +33,30 @@ static void init_palette() {
     }
 }
 
-void gen_line(void *cb_data, int line_num, uint32_t *dest) {
+void gen_line() {
+    auto d = display.try_get_empty_line();
+    if (!d) return;
+    d->physical_end_line = d->physical_start_line + 2;
+    uint16_t *dest = (uint16_t*)d->data;
+    int line_num = d->logical_line_number;
     int y1 = line_num - FRAME_HEIGHT / 2;
     int ysq = y1*y1 * 4;
-    for(int h=0; h<FRAME_WIDTH/2; h++) {
+    for(int h=0; h<FRAME_WIDTH; h++) {
         int x = h - FRAME_WIDTH / 2;
         int r2 = x*x + ysq;
         #define LIM (320*320)
         *dest++ = palette[r2 / 256 % 256];
     }
+    display.put_filled_line(d);
 }
 
 int main() {
-    display.set_callback(gen_line, &display);
-    display.init(FRAME_WIDTH, FRAME_HEIGHT, DVHSTX::MODE_LINE_CALLBACK_RGB565, {13, 15, 17, 19});
+    stdio_init_all();
+    display.init(FRAME_WIDTH, FRAME_HEIGHT, DVHSTX::MODE_RGB565_H2X, {13, 15, 17, 19});
     init_palette();
 
     while(true) {
+        gen_line();
+        tight_loop_contents();
     }
 }

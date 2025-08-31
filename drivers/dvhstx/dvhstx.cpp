@@ -46,26 +46,6 @@ void dvhstx_debug(const char *fmt, ...);
 #define dvhstx_debug printf
 #endif
 
-static inline __attribute__((always_inline)) uint32_t render_char_line(int c, int y) {
-    if (c < 0x20 || c > 0x7e) return 0;
-    const lv_font_fmt_txt_glyph_dsc_t* g = &FONT->dsc->glyph_dsc[c - 0x20 + 1];
-    const uint8_t *b = FONT->dsc->glyph_bitmap + g->bitmap_index;
-    const int ey = y - FONT_HEIGHT + FONT->base_line + g->ofs_y + g->box_h;
-    if (ey < 0 || ey >= g->box_h || g->box_w == 0) {
-        return 0;
-    }
-    else {
-        int bi = (g->box_w * ey);
-
-        uint32_t bits = (b[bi >> 2] << 24) | (b[(bi >> 2) + 1] << 16) | (b[(bi >> 2) + 2] << 8) | b[(bi >> 2) + 3];
-        bits >>= 6 - ((bi & 3) << 1);
-        bits &= 0x3ffffff & (0x3ffffff << ((13 - g->box_w) << 1));
-        bits >>= g->ofs_x << 1;
-
-        return bits;
-    }
-}
-
 // ----------------------------------------------------------------------------
 // HSTX command lists
 
@@ -104,7 +84,7 @@ static const uint32_t vactive_line_header_src[] = {
 static uint32_t vactive_line_header[count_of(vactive_line_header_src)];
 
 #define NUM_FRAME_LINES 2
-#define NUM_CHANS 3
+#define NUM_CHANS 2
 
 static DVHSTX* display = nullptr;
 
@@ -115,43 +95,52 @@ void __scratch_x("display") dma_irq_handler() {
     display->gfx_dma_handler();
 }
 
+#define ch1_num (1)
+#define ch1 (&dma_hw->ch[1])
+#define ch0 (&dma_hw->ch[0])
+
 void __scratch_x("display") DVHSTX::gfx_dma_handler() {
-    // ch_num indicates the channel that just finished, which is the one
-    // we're about to reload.
-    dma_channel_hw_t *ch = &dma_hw->ch[ch_num];
-    dma_hw->intr = 1u << ch_num;
-    if (++ch_num == NUM_CHANS) ch_num = 0;
+    // we trigger on completion of channel 1 (which may be pixel data or control data)
+    dma_hw->intr = 1u << ch1_num;
 
     if (v_scanline >= timing_mode->v_front_porch && v_scanline < (timing_mode->v_front_porch + timing_mode->v_sync_width)) {
-        ch->read_addr = (uintptr_t)vblank_line_vsync_on;
-        ch->transfer_count = count_of(vblank_line_vsync_on);
+        // control only
+        ch1->read_addr = (uintptr_t)vblank_line_vsync_on;
+        ch1->transfer_count = count_of(vblank_line_vsync_on);
+        ch1->ctrl_trig = dma_ctrl_meta;
     } else if (v_scanline < v_inactive_total) {
-        ch->read_addr = (uintptr_t)vblank_line_vsync_off;
-        ch->transfer_count = count_of(vblank_line_vsync_off);
-    } else {
-        const int y = (v_scanline - v_inactive_total) >> v_repeat_shift;
-        const int new_line_num = (v_repeat_shift == 0) ? ch_num : (y & (NUM_FRAME_LINES - 1));
-        const uint line_buf_total_len = ((timing_mode->h_active_pixels * line_bytes_per_pixel) >> 2) + count_of(vactive_line_header);
+        // control only
+        ch1->read_addr = (uintptr_t)vblank_line_vsync_off;
+        ch1->transfer_count = count_of(vblank_line_vsync_off);
+        ch1->ctrl_trig = dma_ctrl_meta;
+    }  else {
+        // we have data and control
+        ch1->read_addr = (uintptr_t)cur_line->data;
+        ch1->transfer_count = timing_mode->h_active_pixels/2;
+        ch0->al1_ctrl = dma_ctrl_data;
+        ch0->read_addr = (uintptr_t)vactive_line_header;
+        ch0->transfer_count = count_of(vactive_line_header);
+        ch0->ctrl_trig = dma_ctrl_meta;
 
-        ch->read_addr = (uintptr_t)&line_buffers[new_line_num * line_buf_total_len];
-        ch->transfer_count = line_buf_total_len;
-
-        // Fill line buffer
-        if (line_num != new_line_num)
-        {
-            line_num = new_line_num;
-            uint32_t* dst_ptr = &line_buffers[line_num * line_buf_total_len + count_of(vactive_line_header)];
-
-            if (callback) {
-                callback(cb_data, y, dst_ptr);
-            }
-        }
     }
 
-    if (++v_scanline == v_total_active_lines) {
+    if (++v_scanline == v_total_lines) {
         v_scanline = 0;
-        line_num = -1;
         //__sev();
+    }
+
+    const int y = v_scanline - v_inactive_total;
+    while (y == 0 || y >= cur_line->physical_end_line) {
+        auto new_line = try_get_filled_line();
+        if (new_line) {
+            if (cur_line)
+                put_empty_line(cur_line);
+            cur_line = new_line;
+            if (y == 0) break;
+        } else {
+            underflow_count++;
+            break;
+        }
     }
 }
 
@@ -279,10 +268,6 @@ bool DVHSTX::init(uint16_t width, uint16_t height, Mode mode_, Pinout pinout)
 {
     if (inited) reset();
 
-    ch_num = 0;
-    line_num = -1;
-    v_scanline = 2;
-
     display_width = width;
     display_height = height;
     frame_width = width;
@@ -363,7 +348,9 @@ bool DVHSTX::init(uint16_t width, uint16_t height, Mode mode_, Pinout pinout)
     dvhstx_debug("Clock setup done\n");
 
     v_inactive_total = timing_mode->v_front_porch + timing_mode->v_sync_width + timing_mode->v_back_porch;
-    v_total_active_lines = v_inactive_total + timing_mode->v_active_lines;
+    v_total_lines = v_inactive_total + timing_mode->v_active_lines;
+    v_active_lines = timing_mode->v_active_lines;
+
     v_repeat = 1 << v_repeat_shift;
     h_repeat = 1 << h_repeat_shift;
 
@@ -384,12 +371,10 @@ bool DVHSTX::init(uint16_t width, uint16_t height, Mode mode_, Pinout pinout)
     vactive_line_header[6] |= timing_mode->h_active_pixels;
 
     switch (mode) {
-    case MODE_LINE_CALLBACK_RGB565:
-        frame_bytes_per_pixel = 2;
-        line_bytes_per_pixel = 2;
+    case MODE_RGB565_H2X:
+        line_bytes_per_pixel = 1; // 2BPP but DMA tricks are used to double the data
         break;
-    case MODE_LINE_CALLBACK_RGB888:
-        frame_bytes_per_pixel = 4;
+    case MODE_RGB888:
         line_bytes_per_pixel = 4;
         break;
     default:
@@ -397,15 +382,21 @@ bool DVHSTX::init(uint16_t width, uint16_t height, Mode mode_, Pinout pinout)
         return false;
     }
 
-    const int frame_pixel_words = (frame_width * h_repeat * line_bytes_per_pixel + 3) >> 2;
-    const int frame_line_words = frame_pixel_words + count_of(vactive_line_header);
-    const int frame_lines = (v_repeat == 1) ? NUM_CHANS : NUM_FRAME_LINES;
-    line_buffers = (uint32_t*)malloc(frame_line_words * 4 * frame_lines);
+    const size_t line_bytes = frame_width * line_bytes_per_pixel;
 
-    for (int i = 0; i < frame_lines; ++i)
+    queue_init(&filled_line_queue, sizeof(uint8_t), count_of(lines));
+    queue_init(&empty_line_queue, sizeof(uint8_t), count_of(lines));
+
+    line_buffers = (uint32_t*)malloc(line_bytes * count_of(lines));
+
+    for (uint8_t i = 0; i < count_of(lines); ++i)
     {
-        memcpy(&line_buffers[i * frame_line_words], vactive_line_header, count_of(vactive_line_header) * sizeof(uint32_t));
+        memcpy(&line_buffers[line_bytes * i], vactive_line_header, count_of(vactive_line_header) * sizeof(uint32_t));
+        lines[i].data = &line_buffers[line_bytes * i];
+        queue_add_blocking(&empty_line_queue, &i);
     }
+
+    cur_line = &lines[count_of(lines) - 1];
 
     // Ensure HSTX FIFO is clear
     reset_block_num(RESET_HSTX);
@@ -414,7 +405,7 @@ bool DVHSTX::init(uint16_t width, uint16_t height, Mode mode_, Pinout pinout)
     sleep_us(10);
 
     switch (mode) {
-    case MODE_LINE_CALLBACK_RGB565:
+    case MODE_RGB565_H2X:
         // Configure HSTX's TMDS encoder for RGB565
         hstx_ctrl_hw->expand_tmds =
             4  << HSTX_CTRL_EXPAND_TMDS_L2_NBITS_LSB |
@@ -433,7 +424,7 @@ bool DVHSTX::init(uint16_t width, uint16_t height, Mode mode_, Pinout pinout)
             0 << HSTX_CTRL_EXPAND_SHIFT_RAW_SHIFT_LSB;
         break;
 
-    case MODE_LINE_CALLBACK_RGB888:
+    case MODE_RGB888:
         // Configure HSTX's TMDS encoder for RGB888
         hstx_ctrl_hw->expand_tmds =
             7  << HSTX_CTRL_EXPAND_TMDS_L2_NBITS_LSB |
@@ -501,14 +492,25 @@ bool DVHSTX::init(uint16_t width, uint16_t height, Mode mode_, Pinout pinout)
 
     dvhstx_debug("GPIO configured\n");
 
-    // The channels are set up identically, to transfer a whole scanline and
-    // then chain to the next channel. Each time a channel finishes, we
-    // reconfigure the one that just finished, meanwhile the other channel(s)
-    // are already making progress.
-    // Using just 2 channels was insufficient to avoid issues with the IRQ.
+    // This creates a dma_channel_config with chain_to=1. When loaded as the
+    // ctrl register of dma channel 0, this will chain from the "metadata" part of the
+    // data into the "data" part of the line (for active lines). When loaded
+    // into the ctrl register of dma channel 1, this will not chain to anything.
+    //
+    // In either event, we have until the 8x32 data FIFO is cleared to respond to the DMA
+    // request and start a fresh DMA transaction in the IRQ handler. (16 pixels
+    // times in the case of DOOM)
     dma_channel_config c;
+    c = dma_channel_get_default_config(1);
+    channel_config_set_dreq(&c, DREQ_HSTX);
+    dma_ctrl_meta = channel_config_get_ctrl_value(&c);
+
+    c = dma_channel_get_default_config(1);
+    channel_config_set_dreq(&c, DREQ_HSTX);
+    channel_config_set_transfer_data_size(&c, mode == MODE_RGB565_H2X ? DMA_SIZE_16 : DMA_SIZE_32);
+    dma_ctrl_data = channel_config_get_ctrl_value(&c);
+
     c = dma_channel_get_default_config(0);
-    channel_config_set_chain_to(&c, 1);
     channel_config_set_dreq(&c, DREQ_HSTX);
     dma_channel_configure(
         0,
@@ -519,7 +521,6 @@ bool DVHSTX::init(uint16_t width, uint16_t height, Mode mode_, Pinout pinout)
         false
     );
     c = dma_channel_get_default_config(1);
-    channel_config_set_chain_to(&c, 2);
     channel_config_set_dreq(&c, DREQ_HSTX);
     dma_channel_configure(
         1,
@@ -529,31 +530,16 @@ bool DVHSTX::init(uint16_t width, uint16_t height, Mode mode_, Pinout pinout)
         count_of(vblank_line_vsync_off),
         false
     );
-    for (int i = 2; i < NUM_CHANS; ++i) {
-        c = dma_channel_get_default_config(i);
-        channel_config_set_chain_to(&c, (i+1) % NUM_CHANS);
-        channel_config_set_dreq(&c, DREQ_HSTX);
-        dma_channel_configure(
-            i,
-            &c,
-            &hstx_fifo_hw->fifo,
-            vblank_line_vsync_off,
-            count_of(vblank_line_vsync_off),
-            false
-        );
-    }
 
     dvhstx_debug("DMA channels claimed\n");
 
-    dma_hw->intr |= (1 << NUM_CHANS) - 1;
-    dma_hw->ints2 |= (1 << NUM_CHANS) - 1;
-    dma_hw->inte2 |= (1 << NUM_CHANS) - 1;
+    dma_hw->intr |= (1 << ch1_num);
+    dma_hw->ints2 |= (1 << ch1_num);
+    dma_hw->inte2 |= (1 << ch1_num);
     irq_set_exclusive_handler(DMA_IRQ_2, dma_irq_handler);
     irq_set_enabled(DMA_IRQ_2, true);
 
-    dma_channel_start(0);
-
-    dvhstx_debug("DVHSTX started\n");
+    dvhstx_debug("DVHSTX configured\n");
 
     inited = true;
     return true;
@@ -577,3 +563,44 @@ void DVHSTX::reset() {
 int DVHSTX::get_h_active_pixels() const {
     return timing_mode->h_active_pixels;
 }
+
+
+DVHSTX::line_data_t *DVHSTX::try_get_empty_line() {
+    uint8_t result;
+    bool status = queue_try_remove(&empty_line_queue, &result);
+    if (!status) {
+        return NULL;
+    }
+    auto line = &lines[result];
+    line->physical_start_line = queue_physical_line;
+    line->logical_line_number = queue_logical_line;
+    return line;
+}
+
+
+DVHSTX::line_data_t *DVHSTX::try_get_filled_line() {
+    uint8_t idx;
+    if (!queue_try_remove(&filled_line_queue, &idx)) {
+        return NULL;
+    }
+    return &lines[idx]; 
+}
+
+void DVHSTX::put_filled_line(DVHSTX::line_data_t *line) {
+    uint8_t idx = line - lines;
+    queue_physical_line = line->physical_end_line;
+    if (queue_physical_line >= v_active_lines) {
+        queue_physical_line = 0;
+        queue_logical_line = 0;
+    } else {
+        queue_logical_line ++;
+    }
+
+    queue_add_blocking(&filled_line_queue, &idx);
+    if (!started && queue_is_full(&filled_line_queue)) {
+        started = true;
+        gfx_dma_handler();
+        dvhstx_debug("buffers full, DMA started\n");
+    }
+}
+
