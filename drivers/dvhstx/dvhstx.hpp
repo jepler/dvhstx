@@ -2,7 +2,7 @@
 
 #include <string.h>
 
-#include "drivers/dvhstx/dvhstx.h"
+#include "dvhstx.h"
 
 #include "hardware/gpio.h"
 #include "pico/stdlib.h"
@@ -75,6 +75,10 @@ namespace pimoroni {
       bool init(uint16_t width, uint16_t height, Mode mode, Pinout pinout);
       void reset();
 
+      void (*release_fn)() = [](){};
+
+      void set_release_fn(void(*fn)()) { release_fn = fn ? fn : [](){}; }
+
       int get_h_repeat_shift() const { return h_repeat_shift; }
       int get_h_active_pixels() const;
 
@@ -83,7 +87,7 @@ namespace pimoroni {
 
 private:
       line_data_t lines[5];
-      int queue_physical_line, queue_logical_line;
+      int queue_physical_line, queue_logical_line, queue_logical_frame;
       bool started;
       volatile int underflow_count;
 
@@ -99,10 +103,8 @@ public:
     private:
       line_data_t *try_get_filled_line();
 
-      void put_empty_line(line_data_t *line) {
-        uint8_t result = line - lines;
-        queue_add_blocking(&empty_line_queue, &result);
-      }
+      void put_empty_line(line_data_t *line);
+
       queue_t empty_line_queue;
       queue_t filled_line_queue;
 

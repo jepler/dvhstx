@@ -593,9 +593,15 @@ DVHSTX::line_data_t *DVHSTX::try_get_empty_line() {
     auto line = &lines[result];
     line->physical_start_line = queue_physical_line;
     line->logical_line_number = queue_logical_line;
+    line->logical_frame_number = queue_logical_frame;
     return line;
 }
 
+void DVHSTX::put_empty_line(line_data_t *line) {
+    uint8_t result = line - lines;
+    queue_add_blocking(&empty_line_queue, &result);
+    release_fn();
+}
 
 DVHSTX::line_data_t *DVHSTX::try_get_filled_line() {
     uint8_t idx;
@@ -611,6 +617,7 @@ void DVHSTX::put_filled_line(DVHSTX::line_data_t *line) {
     if (queue_physical_line >= v_active_lines) {
         queue_physical_line = 0;
         queue_logical_line = 0;
+        queue_logical_frame++;
     } else {
         queue_logical_line ++;
     }
