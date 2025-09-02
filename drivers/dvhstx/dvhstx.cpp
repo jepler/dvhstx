@@ -72,6 +72,18 @@ static const uint32_t vblank_line_vsync_on_src[] = {
 };
 static uint32_t vblank_line_vsync_on[count_of(vblank_line_vsync_on_src)];
 
+static const uint32_t vinvalid_line_header_src[] = {
+    HSTX_CMD_RAW_REPEAT,
+    SYNC_V1_H1,
+    HSTX_CMD_RAW_REPEAT,
+    SYNC_V1_H0,
+    HSTX_CMD_RAW_REPEAT,
+    SYNC_V1_H1,
+    HSTX_CMD_RAW_REPEAT,
+    0x5fd80u, // "valid DC-balanced symbol pair (mid-grey)"      
+};
+static uint32_t vinvalid_line_header[count_of(vinvalid_line_header_src)];
+
 static const uint32_t vactive_line_header_src[] = {
     HSTX_CMD_RAW_REPEAT,
     SYNC_V1_H1,
@@ -113,6 +125,12 @@ void __scratch_x("display") DVHSTX::gfx_dma_handler() {
         ch1->read_addr = (uintptr_t)vblank_line_vsync_off;
         ch1->transfer_count = count_of(vblank_line_vsync_off);
         ch1->ctrl_trig = dma_ctrl_meta;
+    } else if (!cur_line) {
+        // data underrun
+        ch1->read_addr = (uintptr_t)vinvalid_line_header;
+        ch1->transfer_count = count_of(vinvalid_line_header);
+        ch1->ctrl_trig = dma_ctrl_meta;
+        underflow_count++;
     }  else {
         // we have data and control
         ch1->read_addr = (uintptr_t)cur_line->data;
@@ -121,7 +139,6 @@ void __scratch_x("display") DVHSTX::gfx_dma_handler() {
         ch0->read_addr = (uintptr_t)vactive_line_header;
         ch0->transfer_count = count_of(vactive_line_header);
         ch0->ctrl_trig = dma_ctrl_meta;
-
     }
 
     if (++v_scanline == v_total_lines) {
@@ -129,18 +146,14 @@ void __scratch_x("display") DVHSTX::gfx_dma_handler() {
         //__sev();
     }
 
+    if (old_line) {
+        put_empty_line(old_line);
+        old_line = NULL;
+    }
     const int y = v_scanline - v_inactive_total;
-    while (y == 0 || y >= cur_line->physical_end_line) {
-        auto new_line = try_get_filled_line();
-        if (new_line) {
-            if (cur_line)
-                put_empty_line(cur_line);
-            cur_line = new_line;
-            if (y == 0) break;
-        } else {
-            underflow_count++;
-            break;
-        }
+    if (y == 0 || y >= cur_line->physical_end_line || !cur_line) {
+        old_line = cur_line; // can only free this AFTER we start to scan out the next line
+        cur_line = try_get_filled_line();
     }
 }
 
@@ -370,6 +383,12 @@ bool DVHSTX::init(uint16_t width, uint16_t height, Mode mode_, Pinout pinout)
     vactive_line_header[4] |= timing_mode->h_back_porch;
     vactive_line_header[6] |= timing_mode->h_active_pixels;
 
+    memcpy(vinvalid_line_header, vinvalid_line_header_src, sizeof(vinvalid_line_header_src));
+    vinvalid_line_header[0] |= timing_mode->h_front_porch;
+    vinvalid_line_header[2] |= timing_mode->h_sync_width;
+    vinvalid_line_header[4] |= timing_mode->h_back_porch;
+    vinvalid_line_header[6] |= timing_mode->h_active_pixels;
+
     switch (mode) {
     case MODE_RGB565_H2X:
         line_bytes_per_pixel = 1; // 2BPP but DMA tricks are used to double the data
@@ -396,7 +415,7 @@ bool DVHSTX::init(uint16_t width, uint16_t height, Mode mode_, Pinout pinout)
         queue_add_blocking(&empty_line_queue, &i);
     }
 
-    cur_line = &lines[count_of(lines) - 1];
+    cur_line = NULL;
 
     // Ensure HSTX FIFO is clear
     reset_block_num(RESET_HSTX);

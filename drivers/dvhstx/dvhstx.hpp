@@ -82,12 +82,12 @@ namespace pimoroni {
       void gfx_dma_handler(); 
 
 private:
-      line_data_t lines[3];
+      line_data_t lines[5];
       int queue_physical_line, queue_logical_line;
       bool started;
       volatile int underflow_count;
 
-      line_data_t *cur_line;
+      line_data_t *cur_line, *old_line;
 
       uint32_t dma_ctrl_meta;
       uint32_t dma_ctrl_data;

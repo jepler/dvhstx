@@ -20,20 +20,21 @@ static DVHSTX display;
 inline constexpr uint32_t RGB_to_RGB888(const uint8_t r, const uint8_t g, const uint8_t b) {
     return ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
 }
+inline constexpr uint32_t RGB_to_RGB565(int r, int g, int b) {
+    r >>= 3;
+    g >>= 2;
+    b >>= 3;
+    return (r << 11) | (g << 5) | b;
+}
 
-static uint32_t palette[256];
+static uint16_t palette[256];
 static void init_palette() {
     for (int i = 0; i < 256; ++i) {
-#if 0
-        int h = i * (1.f / 255.f), s = 1.0f, v = 0.5f + (i & 7) * (0.5f / 7.f);
-        RGB p = RGB::from_hsv(h, s, v);
-        palette[i] = RGB_to_RGB888(p.r, p.g, p.b);
-#endif
-        palette[i] = RGB_to_RGB888(i, i, i);
+        palette[i] = RGB_to_RGB565(i, i, i);
     }
 }
 
-void gen_line() {
+void __scratch_x("display") gen_line() {
     auto d = display.try_get_empty_line();
     if (!d) return;
     d->physical_end_line = d->physical_start_line + 2;
@@ -50,13 +51,18 @@ void gen_line() {
     display.put_filled_line(d);
 }
 
+void __scratch_x("display") forever_loop() {
+    while(true) {
+        gen_line();
+        // tight_loop_contents();
+    }
+}
+
 int main() {
     stdio_init_all();
     display.init(FRAME_WIDTH, FRAME_HEIGHT, DVHSTX::MODE_RGB565_H2X, {13, 15, 17, 19});
     init_palette();
 
-    while(true) {
-        gen_line();
-        tight_loop_contents();
-    }
+    forever_loop();
+
 }
